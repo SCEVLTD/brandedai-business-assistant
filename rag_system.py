@@ -21,17 +21,25 @@ class BusinessRAG:
     def search_documents(self, query: str, limit: int = 5) -> List[Dict]:
         """Search your existing Supabase vector database"""
         try:
-            # Simple text search - adjust based on your table structure
-            response = self.supabase.table("documents").select("*").ilike(
-                "content", f"%{query}%"
+            # Search in both title and content columns
+            response = self.supabase.table("documents").select(
+                "id, title, content, file_type, file_path, metadata"
+            ).or_(
+                f"title.ilike.%{query}%,content.ilike.%{query}%"
             ).limit(limit).execute()
             
             return response.data if response.data else []
-            
+        
         except Exception as e:
             print(f"Search error: {e}")
-            # Return empty list if search fails
-            return []
+            # Fallback to simple content search
+            try:
+                response = self.supabase.table("documents").select(
+                    "id, title, content, file_type, file_path, metadata"
+                ).ilike("content", f"%{query}%").limit(limit).execute()
+                return response.data if response.data else []
+            except:
+                return []
     
     def classify_query(self, question: str) -> str:
         """Simple query classification"""
@@ -53,7 +61,7 @@ class BusinessRAG:
             # Prepare context from documents
             if context_docs:
                 context = "\n\n".join([
-                    f"Document: {doc.get('file_name', 'Unknown')}\n"
+                    f"Document: {doc.get('title', doc.get('file_path', 'Unknown'))}\n"
                     f"Content: {doc.get('content', '')[:1000]}..."  # Limit content length
                     for doc in context_docs[:3]  # Use top 3 documents
                 ])
@@ -122,7 +130,7 @@ class BusinessRAG:
                 "question": question,
                 "response": response,
                 "query_type": query_type,
-                "sources": [doc.get('file_name', 'Unknown') for doc in relevant_docs],
+                "sources": [doc.get('title', doc.get('file_path', 'Unknown')) for doc in relevant_docs],
                 "source_count": len(relevant_docs)
             }
         
@@ -139,4 +147,5 @@ class BusinessRAG:
 if __name__ == "__main__":
     rag = BusinessRAG()
     result = rag.ask("What projects have we worked on?")
+
     print("Response:", result["response"])
