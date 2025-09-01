@@ -96,82 +96,65 @@ class BusinessRAG:
             return {"error": str(e)}
     
     def search_documents(self, query: str, limit: int = 5) -> List[Dict]:
-        """Search documents using multiple strategies"""
+        """Vector search - uses your existing vector infrastructure"""
         try:
-            if "error" in self.table_info:
-                st.write(f"⚠️ **Cannot search:** {self.table_info['error']}")
-                return []
+            st.write(f"🔍 **Vector searching 254K+ documents for:** '{query}'")
             
-            st.write(f"🔍 **Searching for:** '{query}'")
-            
-            table_name = self.table_info.get("table_name", "documents")
-            text_columns = self.table_info.get("text_columns", [])
-            all_columns = self.table_info.get("columns", ["*"])
-            
-            # Strategy 1: Search in each identified text column
-            for column in text_columns:
-                try:
-                    st.write(f"🔄 **Searching in column:** {column}")
-                    
-                    response = self.supabase.table(table_name).select(
-                        "*"
-                    ).ilike(column, f"%{query}%").limit(limit).execute()
-                    
-                    if response.data:
-                        st.write(f"✅ **Found {len(response.data)} documents in '{column}' column**")
-                        return response.data
-                        
-                except Exception as e:
-                    st.write(f"❌ Search failed for column '{column}': {str(e)}")
-                    continue
-            
-            # Strategy 2: Full table scan with Python filtering
-            st.write("🔄 **Trying full table scan with local filtering...**")
+            # Generate embedding for query using OpenAI
             try:
-                response = self.supabase.table(table_name).select("*").limit(200).execute()
+                import openai
+                openai.api_key = os.getenv("OPENAI_API_KEY")
                 
-                if response.data:
-                    st.write(f"📊 **Retrieved {len(response.data)} documents for local search**")
-                    
-                    matching_docs = []
-                    query_lower = query.lower()
-                    
-                    for doc in response.data:
-                        # Search in all string fields
-                        for key, value in doc.items():
-                            if isinstance(value, str) and query_lower in value.lower():
-                                matching_docs.append(doc)
-                                break
-                        
-                        if len(matching_docs) >= limit:
-                            break
-                    
-                    if matching_docs:
-                        st.write(f"✅ **Local search found {len(matching_docs)} matching documents**")
-                        return matching_docs
-                    else:
-                        st.write("⚠️ **No matches found in local search**")
+                response = openai.Embedding.create(
+                    input=query[:8000],  # Limit query length
+                    model="text-embedding-3-small"
+                )
+                query_embedding = response['data'][0]['embedding']
+                
+                st.write("✅ **Query embedding generated**")
                 
             except Exception as e:
-                st.write(f"❌ Full table scan failed: {str(e)}")
+                st.write(f"❌ **Embedding generation failed:** {str(e)}")
+                return self.fallback_search(limit)
             
-            # Strategy 3: Return sample documents as fallback
-            st.write("🔄 **Returning sample documents for context...**")
+            # Vector search using your existing match_documents function
             try:
-                response = self.supabase.table(table_name).select("*").limit(limit).execute()
+                results = self.supabase.rpc('match_documents', {
+                    'query_embedding': query_embedding,
+                    'match_threshold': 0.3,
+                    'match_count': limit
+                }).execute()
                 
-                if response.data:
-                    st.write(f"✅ **Using {len(response.data)} sample documents**")
-                    return response.data
+                if results.data:
+                    st.write(f"✅ **Found {len(results.data)} highly relevant documents**")
+                    st.write(f"📊 **Similarity scores:** {[f'{r.get('similarity', 0):.2f}' for r in results.data]}")
+                    return results.data
+                else:
+                    st.write("⚠️ **No documents found above similarity threshold - trying fallback**")
+                    return self.fallback_search(limit)
                     
             except Exception as e:
-                st.write(f"❌ Sample retrieval failed: {str(e)}")
-            
-            st.write("❌ **All search strategies failed**")
-            return []
-            
+                st.write(f"❌ **Vector search failed:** {str(e)}")
+                return self.fallback_search(limit)
+                
         except Exception as e:
             st.write(f"❌ **Search error:** {str(e)}")
+            return self.fallback_search(limit)
+    
+    def fallback_search(self, limit: int = 5) -> List[Dict]:
+        """Fallback to recent documents if vector search fails"""
+        try:
+            st.write("🔄 **Using fallback: recent documents**")
+            response = self.supabase.table("documents").select(
+                "id, title, content, file_type, file_path"
+            ).order("id", desc=True).limit(limit).execute()
+            
+            if response.data:
+                st.write(f"✅ **Using {len(response.data)} recent documents**")
+                return response.data
+            return []
+        except Exception as e:
+            st.write(f"❌ **Fallback failed:** {str(e)}")
             return []
     
     def extract_content(self, doc: Dict) -> tuple:
@@ -283,3 +266,4 @@ if __name__ == "__main__":
     result = rag.ask("What projects have we worked on?")
     print("Response:", result["response"])
     print("Sources:", result["sources"])
+
