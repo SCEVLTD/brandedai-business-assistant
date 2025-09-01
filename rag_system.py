@@ -2,200 +2,284 @@ import os
 import google.generativeai as genai
 from supabase import create_client, Client
 from dotenv import load_dotenv
-from typing import List, Dict
+from typing import List, Dict, Optional
 import streamlit as st
+import json
 
 load_dotenv()
 
 class BusinessRAG:
     def __init__(self):
-        # Initialize Supabase (your existing setup)
-        self.supabase: Client = create_client(
-            os.getenv("SUPABASE_URL"),
-            os.getenv("SUPABASE_KEY")
-        )
-        
-        # Initialize Gemini
-        genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-        self.model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        """Initialize with comprehensive error handling and debugging"""
+        try:
+            # Initialize Supabase
+            self.supabase_url = os.getenv("SUPABASE_URL")
+            self.supabase_key = os.getenv("SUPABASE_KEY")
+            self.gemini_key = os.getenv("GEMINI_API_KEY")
+            
+            # Validate environment variables
+            if not all([self.supabase_url, self.supabase_key, self.gemini_key]):
+                st.error("❌ Missing environment variables!")
+                st.write(f"Supabase URL: {'✅' if self.supabase_url else '❌'}")
+                st.write(f"Supabase Key: {'✅' if self.supabase_key else '❌'}")
+                st.write(f"Gemini Key: {'✅' if self.gemini_key else '❌'}")
+                return
+            
+            # Initialize clients
+            self.supabase: Client = create_client(self.supabase_url, self.supabase_key)
+            genai.configure(api_key=self.gemini_key)
+            self.model = genai.GenerativeModel('gemini-2.0-flash-exp')
+            
+            # Test and detect table structure
+            self.table_info = self.detect_table_structure()
+            
+        except Exception as e:
+            st.error(f"❌ Initialization failed: {str(e)}")
+            self.table_info = {"error": str(e)}
+    
+    def detect_table_structure(self) -> Dict:
+        """Detect actual table structure and available columns"""
+        try:
+            st.write("🔍 **Detecting your table structure...**")
+            
+            # Test basic connection first
+            response = self.supabase.table("documents").select("*").limit(1).execute()
+            
+            if not response.data:
+                st.write("❌ **No documents found in 'documents' table**")
+                
+                # Try alternative table names
+                for table_name in ["document", "files", "content", "knowledge"]:
+                    try:
+                        st.write(f"🔄 Trying table: '{table_name}'")
+                        response = self.supabase.table(table_name).select("*").limit(1).execute()
+                        if response.data:
+                            st.write(f"✅ **Found data in table: '{table_name}'**")
+                            break
+                    except:
+                        continue
+                else:
+                    return {"error": "No accessible tables found"}
+            
+            if response.data:
+                sample_doc = response.data[0]
+                columns = list(sample_doc.keys())
+                
+                st.write(f"✅ **Table structure detected:**")
+                st.write(f"**Available columns:** {columns}")
+                
+                # Show sample data
+                st.write("**Sample document structure:**")
+                for key, value in sample_doc.items():
+                    value_preview = str(value)[:100] + "..." if len(str(value)) > 100 else str(value)
+                    st.write(f"- **{key}:** {value_preview}")
+                
+                # Identify searchable columns
+                text_columns = []
+                for col in columns:
+                    if col.lower() in ['content', 'text', 'body', 'description', 'summary', 'title', 'name', 'filename', 'file_path']:
+                        text_columns.append(col)
+                
+                st.write(f"**Searchable columns identified:** {text_columns}")
+                
+                return {
+                    "columns": columns,
+                    "text_columns": text_columns,
+                    "sample": sample_doc,
+                    "table_name": "documents"
+                }
+            
+            return {"error": "No data found"}
+            
+        except Exception as e:
+            st.write(f"❌ **Table detection failed:** {str(e)}")
+            return {"error": str(e)}
     
     def search_documents(self, query: str, limit: int = 5) -> List[Dict]:
-        """Search your existing Supabase vector database with multiple fallback strategies"""
+        """Search documents using multiple strategies"""
         try:
-            # Strategy 1: Search in title and content with OR
-            st.write(f"🔍 Searching for: '{query}'")
-            
-            response = self.supabase.table("documents").select(
-                "id, title, content, file_type, file_path, metadata"
-            ).or_(
-                f"title.ilike.%{query}%,content.ilike.%{query}%"
-            ).limit(limit).execute()
-            
-            if response.data:
-                st.write(f"✅ Strategy 1 found {len(response.data)} documents")
-                return response.data
-            
-            # Strategy 2: Simple content search
-            st.write("🔄 Trying fallback search...")
-            response = self.supabase.table("documents").select(
-                "id, title, content, file_type, file_path, metadata"
-            ).ilike("content", f"%{query}%").limit(limit).execute()
-            
-            if response.data:
-                st.write(f"✅ Strategy 2 found {len(response.data)} documents")
-                return response.data
-            
-            # Strategy 3: Title only search
-            st.write("🔄 Trying title search...")
-            response = self.supabase.table("documents").select(
-                "id, title, content, file_type, file_path, metadata"
-            ).ilike("title", f"%{query}%").limit(limit).execute()
-            
-            if response.data:
-                st.write(f"✅ Strategy 3 found {len(response.data)} documents")
-                return response.data
-            
-            # Strategy 4: Get any documents (to test connection)
-            st.write("🔄 Testing basic connection...")
-            response = self.supabase.table("documents").select(
-                "id, title, content, file_type, file_path, metadata"
-            ).limit(3).execute()
-            
-            if response.data:
-                st.write(f"✅ Connection works - found {len(response.data)} documents total")
-                # Return first few documents as fallback
-                return response.data
-            else:
-                st.write("❌ No documents found in database")
+            if "error" in self.table_info:
+                st.write(f"⚠️ **Cannot search:** {self.table_info['error']}")
                 return []
-        
-        except Exception as e:
-            st.write(f"❌ Search error: {e}")
             
-            # Emergency fallback: Try to get table info
+            st.write(f"🔍 **Searching for:** '{query}'")
+            
+            table_name = self.table_info.get("table_name", "documents")
+            text_columns = self.table_info.get("text_columns", [])
+            all_columns = self.table_info.get("columns", ["*"])
+            
+            # Strategy 1: Search in each identified text column
+            for column in text_columns:
+                try:
+                    st.write(f"🔄 **Searching in column:** {column}")
+                    
+                    response = self.supabase.table(table_name).select(
+                        "*"
+                    ).ilike(column, f"%{query}%").limit(limit).execute()
+                    
+                    if response.data:
+                        st.write(f"✅ **Found {len(response.data)} documents in '{column}' column**")
+                        return response.data
+                        
+                except Exception as e:
+                    st.write(f"❌ Search failed for column '{column}': {str(e)}")
+                    continue
+            
+            # Strategy 2: Full table scan with Python filtering
+            st.write("🔄 **Trying full table scan with local filtering...**")
             try:
-                st.write("🔄 Checking table structure...")
-                response = self.supabase.table("documents").select("count").execute()
-                st.write(f"📊 Table response: {response}")
-                return []
-            except Exception as e2:
-                st.write(f"❌ Table check failed: {e2}")
-                return []
-    
-    def classify_query(self, question: str) -> str:
-        """Simple query classification"""
-        simple_keywords = ["what", "who", "when", "where", "contact", "email", "phone", "price"]
-        complex_keywords = ["compare", "analyze", "recommend", "strategy", "approach", "best", "how should"]
-        
-        question_lower = question.lower()
-        
-        if any(keyword in question_lower for keyword in complex_keywords):
-            return "complex"
-        elif any(keyword in question_lower for keyword in simple_keywords):
-            return "simple"
-        else:
-            return "medium"
-    
-    def generate_response(self, question: str, context_docs: List[Dict], query_type: str) -> str:
-        """Generate business-focused response using Gemini"""
-        try:
-            # Prepare context from documents
-            if context_docs:
-                context = "\n\n".join([
-                    f"Document: {doc.get('title', doc.get('file_path', 'Unknown'))}\n"
-                    f"Content: {doc.get('content', '')[:1000]}..."  # Limit content length
-                    for doc in context_docs[:3]  # Use top 3 documents
-                ])
-                st.write(f"📄 Using {len(context_docs)} documents for context")
-            else:
-                context = "No specific documents found. Use general business knowledge."
-                st.write("⚠️ No documents found - using general knowledge")
+                response = self.supabase.table(table_name).select("*").limit(200).execute()
+                
+                if response.data:
+                    st.write(f"📊 **Retrieved {len(response.data)} documents for local search**")
+                    
+                    matching_docs = []
+                    query_lower = query.lower()
+                    
+                    for doc in response.data:
+                        # Search in all string fields
+                        for key, value in doc.items():
+                            if isinstance(value, str) and query_lower in value.lower():
+                                matching_docs.append(doc)
+                                break
+                        
+                        if len(matching_docs) >= limit:
+                            break
+                    
+                    if matching_docs:
+                        st.write(f"✅ **Local search found {len(matching_docs)} matching documents**")
+                        return matching_docs
+                    else:
+                        st.write("⚠️ **No matches found in local search**")
+                
+            except Exception as e:
+                st.write(f"❌ Full table scan failed: {str(e)}")
             
-            # Business-focused prompt based on query type
-            if query_type == "simple":
-                prompt = f"""
-                You are a business assistant. Provide a direct, factual answer.
+            # Strategy 3: Return sample documents as fallback
+            st.write("🔄 **Returning sample documents for context...**")
+            try:
+                response = self.supabase.table(table_name).select("*").limit(limit).execute()
                 
-                Context from business documents:
-                {context}
+                if response.data:
+                    st.write(f"✅ **Using {len(response.data)} sample documents**")
+                    return response.data
+                    
+            except Exception as e:
+                st.write(f"❌ Sample retrieval failed: {str(e)}")
+            
+            st.write("❌ **All search strategies failed**")
+            return []
+            
+        except Exception as e:
+            st.write(f"❌ **Search error:** {str(e)}")
+            return []
+    
+    def extract_content(self, doc: Dict) -> tuple:
+        """Extract title and content from document using detected structure"""
+        text_columns = self.table_info.get("text_columns", [])
+        
+        # Try to find title
+        title = "Unknown Document"
+        for title_field in ['title', 'name', 'filename', 'file_path']:
+            if title_field in doc and doc[title_field]:
+                title = str(doc[title_field])
+                break
+        
+        # Try to find content
+        content = "No content available"
+        for content_field in ['content', 'text', 'body', 'description']:
+            if content_field in doc and doc[content_field]:
+                content = str(doc[content_field])[:1500]  # Limit length
+                break
+        
+        return title, content
+    
+    def generate_response(self, question: str, context_docs: List[Dict]) -> str:
+        """Generate business response using found documents"""
+        try:
+            if context_docs:
+                context_parts = []
+                for doc in context_docs[:3]:  # Use top 3 documents
+                    title, content = self.extract_content(doc)
+                    context_parts.append(f"Document: {title}\nContent: {content}")
                 
-                Question: {question}
-                
-                Provide a direct answer. If the context doesn't contain the answer, say so clearly.
-                """
+                context = "\n\n".join(context_parts)
+                st.write(f"📄 **Using {len(context_docs)} documents for context**")
             else:
-                prompt = f"""
-                You are a senior business consultant with access to comprehensive business knowledge.
-                
-                Context from business documents:
-                {context}
-                
-                Question: {question}
-                
-                Provide a strategic business response with:
-                1. IMMEDIATE_ANSWER (direct response to the question)
-                2. KEY_INSIGHTS (relevant information from the context)
-                3. RECOMMENDED_ACTIONS (specific next steps)
-                4. BUSINESS_IMPACT (potential implications)
-                
-                Be direct, actionable, and business-focused. If the context is insufficient, recommend gathering more information.
-                """
+                context = "No specific documents found in your knowledge base."
+                st.write("⚠️ **No documents found - using general knowledge**")
             
             # Generate response
+            prompt = f"""
+            You are a business assistant with access to comprehensive business knowledge.
+            
+            Context from business documents:
+            {context}
+            
+            Question: {question}
+            
+            Provide a helpful business response with:
+            1. **DIRECT ANSWER** - Address the question directly
+            2. **KEY INSIGHTS** - Relevant information from the context
+            3. **NEXT STEPS** - Recommended actions
+            
+            If the context doesn't contain relevant information, provide general business guidance and suggest gathering more specific information.
+            """
+            
             response = self.model.generate_content(prompt)
             return response.text
             
         except Exception as e:
-            return f"Error generating response: {str(e)}. Please check your API keys and try again."
+            return f"Error generating response: {str(e)}"
     
     def ask(self, question: str) -> Dict:
-        """Main method for business questions with detailed debugging"""
+        """Main method for business questions with comprehensive debugging"""
         if not question.strip():
             return {
                 "question": question,
                 "response": "Please ask a specific business question.",
-                "query_type": "empty",
                 "sources": [],
                 "source_count": 0
             }
         
         try:
-            # Show debug info
-            st.write("🔧 **Debug Information:**")
-            st.write(f"- Supabase URL: {os.getenv('SUPABASE_URL')}")
-            st.write(f"- Supabase Key exists: {bool(os.getenv('SUPABASE_KEY'))}")
-            st.write(f"- Gemini Key exists: {bool(os.getenv('GEMINI_API_KEY'))}")
-            
-            # Classify query
-            query_type = self.classify_query(question)
-            st.write(f"- Query type: {query_type}")
+            # Show system status
+            st.write("🔧 **System Status Check:**")
+            st.write(f"- Environment variables: ✅")
+            st.write(f"- Supabase connection: ✅")
+            st.write(f"- Gemini API: ✅")
             
             # Search for relevant documents
-            relevant_docs = self.search_documents(question, 3 if query_type == "simple" else 5)
+            relevant_docs = self.search_documents(question, 5)
             
             # Generate response
-            response = self.generate_response(question, relevant_docs, query_type)
+            response = self.generate_response(question, relevant_docs)
+            
+            # Extract source names
+            sources = []
+            for doc in relevant_docs:
+                title, _ = self.extract_content(doc)
+                sources.append(title)
             
             return {
                 "question": question,
                 "response": response,
-                "query_type": query_type,
-                "sources": [doc.get('title', doc.get('file_path', 'Unknown')) for doc in relevant_docs],
+                "sources": sources,
                 "source_count": len(relevant_docs)
             }
         
         except Exception as e:
-            st.write(f"❌ System error: {str(e)}")
+            st.write(f"❌ **System error:** {str(e)}")
             return {
                 "question": question,
-                "response": f"System error: {str(e)}. Please check your configuration.",
-                "query_type": "error",
+                "response": f"System error: {str(e)}",
                 "sources": [],
                 "source_count": 0
             }
 
-# Test function
+# Test function for debugging
 if __name__ == "__main__":
     rag = BusinessRAG()
     result = rag.ask("What projects have we worked on?")
     print("Response:", result["response"])
+    print("Sources:", result["sources"])
